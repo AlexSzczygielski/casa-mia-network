@@ -53,7 +53,7 @@ architecture-beta
 ```bash
 ssh casa_mia_proxmox
 ```
-Web UI: `https://192.168.0.5:8006`
+Web UI: [https://192.168.0.5:8006](https://192.168.0.5:8006)
 
 ## Status
 
