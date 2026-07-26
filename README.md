@@ -69,7 +69,13 @@ architecture-beta
 ```bash
 ssh casa_mia_proxmox
 ```
-Web UI: [https://192.168.0.5:8006](https://192.168.0.5:8006)
+
+## Services
+
+| Service | URL | Runs on |
+|---|---|---|
+| Proxmox web UI | [https://192.168.0.5:8006](https://192.168.0.5:8006) | Proxmox VE |
+| Portainer | [https://192.168.0.136:9443](https://192.168.0.136:9443) | Docker VM |
 
 ## Status
 
