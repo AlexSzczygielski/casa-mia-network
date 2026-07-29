@@ -77,6 +77,7 @@ ssh user@<tailscale_ip_address>
 ```bash
 ssh user@<MagicDNS_hostname>
 ```
+> [!NOTE]
 > Requires Tailscale client installed and logged into the tailnet on both peers. Device list: [Tailscale admin console](https://login.tailscale.com/admin/machines).
 
 ## Network Services
@@ -90,6 +91,84 @@ ssh user@<MagicDNS_hostname>
 | Reverse proxy | None | Services reached directly by IP:port |
 | Remote access | Tailscale | Point-to-point mesh, per-device client. See [Access](#access) |
 | Monitoring | Portainer, Uptime Kuma | Container management + uptime checks |
+
+## Local DNS & TLS — current limitations
+
+Local hostname resolution and trusted HTTPS both require a DNS layer this
+network doesn't have yet.
+
+How this could work: free DNS domain via DuckDNS, TLS certificate issued through a
+DNS-01 challenge, served by an nginx-based reverse proxy (Nginx Proxy
+Manager) in front of local services:
+
+**Where this would run:**
+
+```mermaid
+architecture-beta
+    group virtual(cloud)[Virtual  Docker VM]
+    group external(internet)[Internet]
+
+    service client(server)[LAN Client]
+    service adguard(server)[AdGuard Home] in virtual
+    service npm(server)[Nginx Proxy Manager] in virtual
+
+    service duckdns(internet)[DuckDNS] in external
+    service le(internet)[Lets Encrypt] in external
+
+    client:R -- L:adguard
+    client:B -- T:npm
+    npm:R -- L:duckdns
+    duckdns:R -- L:le
+```
+
+**Request flow (day-to-day use):**
+
+```mermaid
+graph LR
+    Client[Client Browser] -->|1 . resolve hostname| AdGuard[AdGuard Home DNS]
+    AdGuard -->|2 . returns LAN IP| Client
+    Client -->|3 . HTTPS request| NPM[Nginx Proxy Manager]
+    NPM -->|4 . proxied request| Backend[Local Service]
+```
+
+**Certificate issuance (DNS-01, one-time / renewal):**
+
+```mermaid
+graph LR
+    NPM[Nginx Proxy Manager] -->|1 . request TXT record| DuckDNS[DuckDNS API]
+    DuckDNS -->|2 . validates via TXT| LE[Let's Encrypt]
+    LE -->|3 . issues certificate| NPM
+```
+
+> [!CAUTION]
+> Investigating this surfaced several
+constraints — both in the ISP router and in how TLS/hostname resolution
+work in general — which are documented below:
+
+| Constraint | Detail |
+|---|---|
+| No custom DNS via DHCP | Router's DHCP settings don't expose a field to hand out a DNS server other than the ISP's own. Local hosts must be reached by IP. |
+| No bridge mode | ISP router locks this down in practice; so adding another router not pursued as a workaround. |
+| Public CA certs need a real hostname | Certs are bound to a name (SAN), checked during the TLS handshake before any HTTP request is seen — a reverse proxy can't redirect an IP-based request to fix this after the fact. Private IPs also can't get a publicly-trusted cert at all (CA/Browser Forum rule — no global uniqueness guarantee). |
+
+> [!NOTE]
+> **Current status:** DuckDNS + DNS-01 + reverse proxy plan still holds for
+issuing the certificate itself (no local dependency, no port-forwarding
+needed). What it's missing is a local DNS resolver (AdGuard Home, planned)
+to resolve the DuckDNS name to the reverse proxy's LAN IP for LAN clients —
+router can't push this via DHCP, so it can be set per-device (manual DNS
+override) rather than network-wide, at least initially.
+
+## Remote DNS & TLS
+
+Handled entirely by Tailscale — no local dependency, no interaction with the
+limitations above.
+
+| Layer | Solution |
+|---|---|
+| Name resolution | MagicDNS — tailnet nodes resolve by Tailscale hostname (`docker-vm`, etc.) |
+| Certificates | `tailscale cert` can issue valid HTTPS certs per-node against Tailscale's own CA — not yet set up |
+| Reachability | Point-to-point over the tailnet, no port forwarding, unaffected by CGNAT |
 
 ## Services
 
