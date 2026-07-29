@@ -86,7 +86,7 @@ ssh user@<MagicDNS_hostname>
 |---|---|---|
 | L2/L3 switching | None | Current router is limited, no VLANs |
 | DHCP | Router (manual/static leases) | No dedicated DHCP server yet - current router limitation|
-| DNS | None locally; MagicDNS for tailnet | Local hosts referenced by IP; Tailscale nodes resolve by tailscale's hostname (`docker-vm`, etc.) via MagicDNS - see [tailscale admin panel](https://console.tailscale.com/admin/machines)|
+| DNS | Pi-hole (local), MagicDNS (tailnet) | Pi-hole (`192.168.0.136:53`) resolves **only for LAN clients configured to use it manually** (*no DHCP-pushed DNS* — router limitation, see below). Unconfigured devices have to reference services by IP; Tailscale nodes resolve by tailscale's hostname (`docker-vm`, etc.) via MagicDNS - see [tailscale admin panel](https://console.tailscale.com/admin/machines) |
 | TLS/Certificates | None (local); Tailscale-issued available **not set up** | Local services use plain HTTP or self-signed certs (e.g. Proxmox's default) — browser warnings expected. Tailscale can issue valid HTTPS certs per-node via `tailscale cert`, but not yet set up. |
 | Reverse proxy | None | Services reached directly by IP:port |
 | Remote access | Tailscale | Point-to-point mesh, per-device client. See [Access](#access) |
@@ -151,13 +151,22 @@ work in general — which are documented below:
 | No bridge mode | ISP router locks this down in practice; so adding another router not pursued as a workaround. |
 | Public CA certs need a real hostname | Certs are bound to a name (SAN), checked during the TLS handshake before any HTTP request is seen — a reverse proxy can't redirect an IP-based request to fix this after the fact. Private IPs also can't get a publicly-trusted cert at all (CA/Browser Forum rule — no global uniqueness guarantee). |
 
-> [!NOTE]
+> [!IMPORTANT]
 > **Current status:** DuckDNS + DNS-01 + reverse proxy plan still holds for
 issuing the certificate itself (no local dependency, no port-forwarding
 needed). What it's missing is a local DNS resolver (AdGuard Home, planned)
 to resolve the DuckDNS name to the reverse proxy's LAN IP for LAN clients —
 router can't push this via DHCP, so it can be set per-device (manual DNS
 override) rather than network-wide, at least initially.
+
+> [!NOTE]
+> **Pi-hole vs. this plan:** Pi-hole is now running on the Docker VM, providing
+local DNS resolution and ad/tracker blocking only for **clients manually configured
+to use it** (`192.168.0.136:53`). This solves local DNS resolution but is a
+separate concern from the plan above, which is specifically about resolving
+the *DuckDNS hostname* to the reverse proxy's LAN IP for trusted HTTPS.
+Whether Pi-hole ends up handling that resolution role too (instead of
+AdGuard Home) or the two run side by side is not yet decided.
 
 ## Remote DNS & TLS
 
@@ -175,6 +184,7 @@ limitations above.
 | Service | URL | Runs on |
 |---|---|---|
 | Proxmox web UI | [https://192.168.0.5:8006](https://192.168.0.5:8006) | Proxmox VE |
+| Pi-hole | [http://192.168.0.136:8081/admin](http://192.168.0.136:8081/admin) | Docker VM |
 | Portainer | [https://192.168.0.136:9443](https://192.168.0.136:9443) | Docker VM |
 
 ## Status
@@ -183,3 +193,4 @@ limitations above.
 - [x] Docker VM created and reachable
 - [x] Tailscale installed on Docker VM, remote SSH confirmed working
 - [x] Tailscale installed on Proxmox VE
+- [x] Pi-hole installed on Docker VM — local DNS + ad-blocking, privacy level 3 (no query/client logging)
