@@ -1,6 +1,7 @@
 # Casa Mia Network
 
 Home network and homelab documentation — topology, IP allocation, and node configuration.
+For deployment details refer to the [Casa Mia Network Infrastructure Repository](https://github.com/AlexSzczygielski/casa-mia-net-infrastructure)
 
 ## Topology
 
@@ -23,6 +24,16 @@ graph TD
     PVE --> Docker
     Router --> Pi
     Router --> Laptop
+
+    classDef isp fill:#999,stroke:#666,color:#fff
+    classDef network fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef compute fill:#5cb85c,stroke:#3d8b3d,color:#fff
+    classDef virtual fill:#e8a33d,stroke:#b5791f,color:#fff
+
+    class ISP isp
+    class Router network
+    class PVE,Pi,Laptop compute
+    class Docker virtual
 ```
 
 ## Components
@@ -65,6 +76,7 @@ architecture-beta
 | Raspberry Pi | `192.168.0.241` | — | Remote Wake-on-LAN | No SSH exposed — see [vps-wake-on-lan-no-ssh](https://github.com/AlexSzczygielski/vps-wake-on-lan-no-ssh). Fixed via DHCP reservation |
 
 ## Access
+
 **Local**:
 ```bash
 ssh user@<node_ip_address>
@@ -85,107 +97,172 @@ ssh user@<MagicDNS_hostname>
 | Layer | Solution | Notes |
 |---|---|---|
 | L2/L3 switching | None | Current router is limited, no VLANs |
-| DHCP | Router (manual/static leases) | No dedicated DHCP server yet - current router limitation|
-| DNS | Pi-hole (local), MagicDNS (tailnet) | Pi-hole (`192.168.0.136:53`) resolves **only for LAN clients configured to use it manually** (*no DHCP-pushed DNS* — router limitation, see below). Unconfigured devices have to reference services by IP; Tailscale nodes resolve by tailscale's hostname (`docker-vm`, etc.) via MagicDNS - see [tailscale admin panel](https://console.tailscale.com/admin/machines) |
-| TLS/Certificates | None (local); Tailscale-issued available **not set up** | Local services use plain HTTP or self-signed certs (e.g. Proxmox's default) — browser warnings expected. Tailscale can issue valid HTTPS certs per-node via `tailscale cert`, but not yet set up. |
-| Reverse proxy | None | Services reached directly by IP:port |
+| DHCP | Router (manual/static leases) | No dedicated DHCP server yet - current router limitation |
+| DNS | Pi-hole (LAN, manually configured per device), Tailscale split DNS (tailnet) | See [Local DNS & TLS](#local-dns--tls) and [Remote DNS & TLS](#remote-dns--tls) below |
+| TLS/Certificates | Real, publicly-trusted Let's Encrypt certificates, issued via Cloudflare DNS-01 | Covers both the LAN and Tailscale domains — see below. No self-signed certs or browser warnings for any Caddy-fronted service |
+| Reverse proxy | Caddy | Terminates TLS for all proxied services; see the infra repo's [`caddy/README.md`](https://github.com/AlexSzczygielski/casa-mia-net-infrastructure/blob/main/caddy/README.md) for more info |
 | Remote access | Tailscale | Point-to-point mesh, per-device client. See [Access](#access) |
 | Monitoring | Portainer, Uptime Kuma | Container management + uptime checks |
 
-## Local DNS & TLS — current limitations
+## Local DNS & TLS
 
-Local hostname resolution and trusted HTTPS both require a DNS layer this
-network doesn't have yet.
+Local hostname resolution and trusted HTTPS now both work, via a domain
+this network actually owns rather than a free dynamic-DNS subdomain.
 
-How this could work: free DNS domain via DuckDNS, TLS certificate issued through a
-DNS-01 challenge, served by an nginx-based reverse proxy (Nginx Proxy
-Manager) in front of local services:
+> [!TIP]
+> A domain requires two distinct roles — a registrar, which owns the
+registration, and a DNS host, which is authoritative for the zone's
+records. These need not be the same provider. Caddy proves domain control
+to Let's Encrypt via a DNS-01 challenge: a temporary TXT record written
+through the DNS host's API. This requires no public-facing web server or
+open inbound port, which is what makes certificate issuance possible
+despite the ISP's CGNAT precluding inbound connections entirely. The
+resulting certificate is a standard, publicly-trusted artifact for a domain
+that is never itself publicly reachable — reachability is governed
+independently, by local DNS resolution (Pi-hole), and is scoped to devices
+on the LAN or tailnet only.
 
-**Where this would run:**
+**Components:**
+
+| Role | Solution |
+|---|---|
+| Domain | `casamia-net.top` |
+| Registrar | [Porkbun](https://porkbun.com/account/login) |
+| DNS host | [Cloudflare](https://dash.cloudflare.com) (nameservers delegated from Porkbun) |
+| Certificate issuance | Caddy, DNS-01 challenge via Cloudflare's API |
+| Local resolution | Pi-hole, wildcard DNS records |
+| Reverse proxy / TLS termination | Caddy |
+
+**Where this runs:**
 
 ```mermaid
-architecture-beta
-    group virtual(cloud)[Virtual  Docker VM]
-    group external(internet)[Internet]
+graph TD
+    Client[Client<br/>LAN or Tailscale]
 
-    service client(server)[LAN Client]
-    service adguard(server)[AdGuard Home] in virtual
-    service npm(server)[Nginx Proxy Manager] in virtual
+    subgraph DockerVM[Docker VM]
+        PiHole[Pi-hole]
+        Caddy[Caddy]
+        Backend[Backend Service]
+    end
 
-    service duckdns(internet)[DuckDNS] in external
-    service le(internet)[Lets Encrypt] in external
+    subgraph External[Internet]
+        Porkbun[Porkbun<br/>Registrar]
+        Cloudflare[Cloudflare<br/>DNS host]
+        LE[Let's Encrypt]
+    end
 
-    client:R -- L:adguard
-    client:B -- T:npm
-    npm:R -- L:duckdns
-    duckdns:R -- L:le
+    Client -->|1 . resolve hostname| PiHole
+    PiHole -->|2 . returns LAN/Tailscale IP| Client
+    Client -->|3 . HTTPS request| Caddy
+    Caddy -->|4 . proxied request| Backend
+
+    Caddy -.->|5 . write TXT record<br/>DNS-01 challenge| Cloudflare
+    Cloudflare -.->|6 . validates| LE
+    LE -.->|7 . issues certificate| Caddy
+    Porkbun -.->|nameserver delegation<br/>one-time| Cloudflare
+
+    classDef client fill:#4a90d9,stroke:#2c5f8a,color:#fff
+    classDef internal fill:#5cb85c,stroke:#3d8b3d,color:#fff
+    classDef external fill:#999,stroke:#666,color:#fff
+
+    class Client client
+    class PiHole,Caddy,Backend internal
+    class Porkbun,Cloudflare,LE external
 ```
 
 **Request flow (day-to-day use):**
 
 ```mermaid
 graph LR
-    Client[Client Browser] -->|1 . resolve hostname| AdGuard[AdGuard Home DNS]
-    AdGuard -->|2 . returns LAN IP| Client
-    Client -->|3 . HTTPS request| NPM[Nginx Proxy Manager]
-    NPM -->|4 . proxied request| Backend[Local Service]
+    Client[Client LAN or Tailscale] -->|1 . resolve hostname| PiHole[Pi-hole]
+    PiHole -->|2 . returns LAN or Tailscale IP| Client
+    Client -->|3 . HTTPS request| Caddy[Caddy]
+    Caddy -->|4 . proxied request| Backend[Local Service]
 ```
 
 **Certificate issuance (DNS-01, one-time / renewal):**
 
 ```mermaid
 graph LR
-    NPM[Nginx Proxy Manager] -->|1 . request TXT record| DuckDNS[DuckDNS API]
-    DuckDNS -->|2 . validates via TXT| LE[Let's Encrypt]
-    LE -->|3 . issues certificate| NPM
+    Caddy[Caddy] -->|1 . request TXT record| Cloudflare[Cloudflare API]
+    Cloudflare -->|2 . validates via TXT| LE[Lets Encrypt]
+    LE -->|3 . issues certificate| Caddy
 ```
 
-> [!CAUTION]
-> Investigating this surfaced several
-constraints — both in the ISP router and in how TLS/hostname resolution
-work in general — which are documented below:
+Two domain patterns exist per service — `<service>.casamia-net.top` for LAN,
+`<service>.ts.casamia-net.top` for Tailscale — resolved differently by
+Pi-hole depending on which one is queried. This is not automatic
+network-aware routing (a single URL that follows you between networks);
+it's two fixed, separate URLs. Full reasoning and the tradeoffs involved are
+documented in the infra repo's [`pihole/README.md`](https://github.com/AlexSzczygielski/casa-mia-net-infrastructure/blob/main/pihole/README.md).
+
+> [!IMPORTANT]
+> **DNS is still manually configured per device, not network-wide.** The ISP
+> router doesn't expose a field to push a custom DNS server via DHCP — but
+> separately, and more importantly, this network has other household
+> members on it, so even if the router allowed it, pushing Pi-hole as the
+> network-wide DNS server isn't something to do unilaterally. Devices that
+> want Pi-hole resolution (and therefore access to `casamia-net.top`
+> services) have their DNS set manually, per device, to `192.168.0.136`.
+> Unconfigured devices fall back to the router's own DNS and simply can't
+> resolve these hostnames — expected, not a bug.
+
+<details>
+<summary>Why not DuckDNS free domain?</summary>
+
+DuckDNS was the original plan (see the collapsed history below), but using
+it with Caddy for DNS-01 requires compiling a third-party DNS provider
+module directly into the Caddy binary — a small, community-maintained
+module with limited scrutiny, running with the same process privileges as
+Caddy itself (certificate private keys, network position on the internal
+Docker network). Cloudflare's equivalent module is far more widely used and
+audited. Migrating also solved a separate, harder blocker: DuckDNS
+subdomains can't be delegated to a real DNS host at all, since Cloudflare
+requires actual registrar-level control, which a free subdomain of someone
+else's domain never provides. Full reasoning in the infra repo's
+[`caddy/README.md`](https://github.com/AlexSzczygielski/casa-mia-net-infrastructure/blob/main/caddy/README.md).
+</details>
+
+<details>
+<summary>Constraints that shaped this design</summary>
 
 | Constraint | Detail |
 |---|---|
-| No custom DNS via DHCP | Router's DHCP settings don't expose a field to hand out a DNS server other than the ISP's own. Local hosts must be reached by IP. |
-| No bridge mode | ISP router locks this down in practice; so adding another router not pursued as a workaround. |
-| Public CA certs need a real hostname | Certs are bound to a name (SAN), checked during the TLS handshake before any HTTP request is seen — a reverse proxy can't redirect an IP-based request to fix this after the fact. Private IPs also can't get a publicly-trusted cert at all (CA/Browser Forum rule — no global uniqueness guarantee). |
+| No custom DNS via DHCP | Router's DHCP settings don't expose a field to hand out a DNS server other than the ISP's own. Local hosts must be configured individually. |
+| No bridge mode | ISP router locks this down in practice; adding another router not pursued as a workaround. |
+| Public CA certs need a real hostname | Certs are bound to a name (SAN), checked during the TLS handshake before any HTTP request is seen. Private IPs can't get a publicly-trusted cert at all (CA/Browser Forum rule — no global uniqueness guarantee). This is the core reason a real owned domain plus DNS-01 was necessary rather than any IP-based alternative. |
+| CGNAT / no port forwarding | ISP is CGNAT/DS-Lite — inbound connections from the public internet aren't possible at all. This is actually what makes the setup *safe*: nothing here is ever reachable from outside the LAN/tailnet, regardless of DNS or certificates existing. |
 
-> [!IMPORTANT]
-> **Current status:** DuckDNS + DNS-01 + reverse proxy plan still holds for
-issuing the certificate itself (no local dependency, no port-forwarding
-needed). What it's missing is a local DNS resolver (AdGuard Home, planned)
-to resolve the DuckDNS name to the reverse proxy's LAN IP for LAN clients —
-router can't push this via DHCP, so it can be set per-device (manual DNS
-override) rather than network-wide, at least initially.
-
-> [!NOTE]
-> **Pi-hole vs. this plan:** Pi-hole is now running on the Docker VM, providing
-local DNS resolution and ad/tracker blocking only for **clients manually configured
-to use it** (`192.168.0.136:53`). This solves local DNS resolution but is a
-separate concern from the plan above, which is specifically about resolving
-the *DuckDNS hostname* to the reverse proxy's LAN IP for trusted HTTPS.
-Whether Pi-hole ends up handling that resolution role too (instead of
-AdGuard Home) or the two run side by side is not yet decided.
+</details>
 
 ## Remote DNS & TLS
 
-Handled entirely by Tailscale — no local dependency, no interaction with the
-limitations above.
+Handled via Tailscale's split DNS feature, layered on top of the same
+Pi-hole + Caddy setup above — not a separate mechanism.
 
 | Layer | Solution |
 |---|---|
-| Name resolution | MagicDNS — tailnet nodes resolve by Tailscale hostname (`docker-vm`, etc.) |
-| Certificates | `tailscale cert` can issue valid HTTPS certs per-node against Tailscale's own CA — not yet set up |
+| Name resolution | Tailscale **restricted nameserver**: tailnet queries for `casamia-net.top` and its subdomains are routed to Pi-hole's Tailscale IP; everything else still uses MagicDNS normally |
+| Certificates | Same real Let's Encrypt certificates as the LAN side — Caddy's certificate for `*.ts.casamia-net.top` covers this, not a separate Tailscale-issued cert |
 | Reachability | Point-to-point over the tailnet, no port forwarding, unaffected by CGNAT |
+
+> [!NOTE]
+> This intentionally does **not** use `tailscale cert` or MagicDNS-based
+> hostnames for these services — the domain-based approach above already
+> covers Tailscale clients with real, trusted certificates, so a second,
+> separate certificate mechanism isn't needed.
 
 ## Services
 
-| Service | URL | Runs on |
+Full, current list of proxied services lives in the infra repo's Caddyfile,
+not duplicated here. A couple of examples to show the pattern:
+
+| Service | LAN | Tailscale |
 |---|---|---|
-| Proxmox web UI | [https://192.168.0.5:8006](https://192.168.0.5:8006) | Proxmox VE |
-| Pi-hole | [http://192.168.0.136:8081/admin](http://192.168.0.136:8081/admin) | Docker VM |
-| Portainer | [https://192.168.0.136:9443](https://192.168.0.136:9443) | Docker VM |
+| Pi-hole | `https://pihole.casamia-net.top` | `https://pihole.ts.casamia-net.top` |
+| Vaultwarden | `https://vaultwarden.casamia-net.top` | `https://vaultwarden.ts.casamia-net.top` |
+
+See [`caddy/README.md`](https://github.com/AlexSzczygielski/casa-mia-net-infrastructure/blob/main/caddy/README.md) in the infrastructure repo for the complete, current list.
 
 ## Status
 
@@ -194,3 +271,10 @@ limitations above.
 - [x] Tailscale installed on Docker VM, remote SSH confirmed working
 - [x] Tailscale installed on Proxmox VE
 - [x] Pi-hole installed on Docker VM — local DNS + ad-blocking, privacy level 3 (no query/client logging)
+- [x] Domain registered (`casamia-net.top`, via Porkbun)
+- [x] DNS delegated to Cloudflare (nameservers switched at Porkbun)
+- [x] Caddy deployed — reverse proxy + automatic TLS via Cloudflare DNS-01
+- [x] Pi-hole wildcard DNS for LAN + Tailscale domain split
+- [x] Tailscale split DNS (restricted nameserver) configured for the tailnet
+- [x] Homepage dashboard deployed
+- [ ] Vaultwarden deployed behind Caddy
